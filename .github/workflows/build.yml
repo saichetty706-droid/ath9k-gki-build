@@ -1,0 +1,63 @@
+name: Build ATH9K Modules
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev git clang llvm lld curl
+    - name: Clone and configure
+      run: |
+        git clone --depth=1 --branch android13-5.15 https://android.googlesource.com/kernel/common aosp_kernel
+        cd aosp_kernel
+        sed -i 's/SUBLEVEL = .*/SUBLEVEL = 41/' Makefile
+        touch .scmversion && echo "" > .scmversion
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 gki_defconfig
+        scripts/config --file .config --enable CONFIG_CFG80211
+        scripts/config --file .config --set-val CONFIG_MAC80211 m
+        scripts/config --file .config --enable CONFIG_WLAN_VENDOR_ATH
+        scripts/config --file .config --set-val CONFIG_ATH9K m
+        scripts/config --file .config --set-val CONFIG_ATH9K_HTC m
+        scripts/config --file .config --set-val CONFIG_ATH9K_HW m
+        scripts/config --file .config --set-val CONFIG_ATH9K_COMMON m
+        scripts/config --file .config --enable CONFIG_ATH9K_BTCOEX_SUPPORT
+        scripts/config --file .config --set-val CONFIG_LTO_NONE y
+        scripts/config --file .config --disable CONFIG_LTO_CLANG_FULL
+        scripts/config --file .config --disable CONFIG_LTO_CLANG_THIN
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 olddefconfig
+    - name: Fix source
+      run: |
+        cd aosp_kernel
+        sed -i 's/extern bool android_kmalloc_64_create;/\/\/ extern bool android_kmalloc_64_create;/' include/linux/slab.h
+        sed -i 's/if (android_kmalloc_64_create && size <= 64)/if (0)/' include/linux/slab.h
+        sed -i 's/if (android_kmalloc_64_create && size == 64)/if (0)/' include/linux/slab.h
+        sed -i 's/android_kmalloc_64_create = true;/\/\/ android_kmalloc_64_create = true;/' mm/slab_common.c
+        sed -i 's/if (android_kmalloc_64_create)/if (0)/g' mm/slab_common.c
+        sed -i 's/^bool android_kmalloc_64_create/\/\/ bool android_kmalloc_64_create/' mm/slab_common.c
+        sed -i 's/^EXPORT_SYMBOL(android_kmalloc_64_create)/\/\/ EXPORT_SYMBOL(android_kmalloc_64_create)/' mm/slab_common.c
+        sed -i '102,107d' usr/include/Makefile
+        sed -i '101a\      cmd_hdrtest = echo "$@: $<" > $(depfile) && touch $@' usr/include/Makefile
+    - name: Build
+      run: |
+        cd aosp_kernel
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=clang LLVM=1 KCFLAGS="-w" -j$(nproc) Image modules
+    - name: Collect and upload
+      run: |
+        mkdir -p output
+        cp aosp_kernel/drivers/net/wireless/ath/ath.ko output/
+        cp aosp_kernel/drivers/net/wireless/ath/ath9k/ath9k.ko output/
+        cp aosp_kernel/drivers/net/wireless/ath/ath9k/ath9k_hw.ko output/
+        cp aosp_kernel/drivers/net/wireless/ath/ath9k/ath9k_common.ko output/
+        cp aosp_kernel/drivers/net/wireless/ath/ath9k/ath9k_htc.ko output/
+        cp aosp_kernel/net/wireless/cfg80211.ko output/ || true
+        cp aosp_kernel/net/mac80211/mac80211.ko output/ || true
+        ls -la output/*.ko
+    - name: Upload modules
+      uses: actions/upload-artifact@v4
+      with:
+        name: ath9k-modules-gki-5.15.41
+        path: output/*.ko
